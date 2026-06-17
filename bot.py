@@ -4,14 +4,24 @@ import math
 import requests
 import yfinance as yf
 import ssl
+import sys
 from datetime import datetime
-from nostr.key import PrivateKey
-from nostr.event import Event
-from nostr.relay_manager import RelayManager
 
 BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHANNEL_ID = os.environ['TELEGRAM_CHANNEL_ID']
 NOSTR_PRIVATE_KEY = os.environ.get('NOSTR_PRIVATE_KEY')
+
+# Safely try to import nostr - script continues even if this fails
+NOSTR_AVAILABLE = False
+try:
+    from nostr.key import PrivateKey
+    from nostr.event import Event
+    from nostr.relay_manager import RelayManager
+    NOSTR_AVAILABLE = True
+    print("✅ Nostr library loaded successfully")
+except Exception as e:
+    print(f"⚠️  Nostr library not available: {e}")
+    NOSTR_AVAILABLE = False
 
 def is_valid_number(n):
     if n is None:
@@ -27,7 +37,8 @@ def fetch_with_retry(url, max_retries=3, delay=2):
             if resp.status_code == 200:
                 return resp.json()
             time.sleep(delay * (attempt + 1))
-        except:
+        except Exception as e:
+            print(f"Fetch attempt {attempt + 1} failed: {e}")
             if attempt == max_retries - 1:
                 return None
             time.sleep(delay * (attempt + 1))
@@ -56,57 +67,62 @@ def get_volume_data():
                         'kraken_vol': kraken_vol,
                         'coinbase_vol': coinbase_vol
                     }
-        except:
+        except Exception as e:
+            print(f"Volume data attempt {attempt + 1} error: {e}")
             time.sleep(3)
     return None
 
 def get_stock_data():
-    ticker = yf.Ticker("COIN")
-    
-    for period in ['2d', '5d', '1mo']:
-        try:
-            hist = ticker.history(period=period)
-            if not hist.empty and len(hist) >= 2:
-                closes = hist['Close'].dropna()
-                if len(closes) >= 2:
-                    current = closes.iloc[-1]
-                    previous = closes.iloc[-2]
-                    if is_valid_number(current) and is_valid_number(previous):
-                        change = ((current - previous) / previous) * 100
-                        info = ticker.info
-                        market_cap = info.get('marketCap') or info.get('enterpriseValue') or 0
-                        return {
-                            'price': current,
-                            'change': change,
-                            'market_cap': market_cap
-                        }
-        except:
-            continue
-    
     try:
-        info = ticker.info
-        price = (info.get('regularMarketPrice') or 
-                info.get('currentPrice') or 
-                info.get('previousClose'))
-        prev_close = (info.get('regularMarketPreviousClose') or 
-                     info.get('previousClose'))
-        market_cap = info.get('marketCap') or info.get('enterpriseValue') or 0
+        ticker = yf.Ticker("COIN")
         
-        if is_valid_number(price) and is_valid_number(prev_close) and prev_close > 0:
-            change = ((price - prev_close) / prev_close) * 100
-            return {
-                'price': price,
-                'change': change,
-                'market_cap': market_cap
-            }
-        elif is_valid_number(price):
-            return {
-                'price': price,
-                'change': 0.0,
-                'market_cap': market_cap
-            }
-    except:
-        pass
+        for period in ['2d', '5d', '1mo']:
+            try:
+                hist = ticker.history(period=period)
+                if not hist.empty and len(hist) >= 2:
+                    closes = hist['Close'].dropna()
+                    if len(closes) >= 2:
+                        current = closes.iloc[-1]
+                        previous = closes.iloc[-2]
+                        if is_valid_number(current) and is_valid_number(previous):
+                            change = ((current - previous) / previous) * 100
+                            info = ticker.info
+                            market_cap = info.get('marketCap') or info.get('enterpriseValue') or 0
+                            return {
+                                'price': current,
+                                'change': change,
+                                'market_cap': market_cap
+                            }
+            except Exception as e:
+                print(f"Stock history error ({period}): {e}")
+                continue
+        
+        try:
+            info = ticker.info
+            price = (info.get('regularMarketPrice') or 
+                    info.get('currentPrice') or 
+                    info.get('previousClose'))
+            prev_close = (info.get('regularMarketPreviousClose') or 
+                         info.get('previousClose'))
+            market_cap = info.get('marketCap') or info.get('enterpriseValue') or 0
+            
+            if is_valid_number(price) and is_valid_number(prev_close) and prev_close > 0:
+                change = ((price - prev_close) / prev_close) * 100
+                return {
+                    'price': price,
+                    'change': change,
+                    'market_cap': market_cap
+                }
+            elif is_valid_number(price):
+                return {
+                    'price': price,
+                    'change': 0.0,
+                    'market_cap': market_cap
+                }
+        except Exception as e:
+            print(f"Stock info error: {e}")
+    except Exception as e:
+        print(f"Stock data error: {e}")
     
     return None
 
@@ -186,19 +202,23 @@ def post_to_telegram(message):
         if response.status_code == 200:
             print("✅ Posted to Telegram successfully")
         else:
-            print(f"❌ Telegram failed: {response.status_code}")
+            print(f"❌ Telegram failed: {response.status_code} - {response.text}")
     except Exception as e:
         print(f"❌ Telegram error: {e}")
 
 def post_to_nostr(message):
     """Post message to Nostr relays"""
+    if not NOSTR_AVAILABLE:
+        print("⚠️  Nostr library not available, skipping")
+        return
+    
     if not NOSTR_PRIVATE_KEY:
         print("⚠️  No NOSTR_PRIVATE_KEY found, skipping Nostr")
         return
     
     try:
-        # Support both hex and nsec formats (if nsec, warn user)
-        key_hex = NOSTR_PRIVATE_KEY
+        # Support both hex and nsec formats
+        key_hex = NOSTR_PRIVATE_KEY.strip()
         if key_hex.startswith('nsec1'):
             print("❌ Error: Please provide private key in hex format, not nsec1")
             return
@@ -228,21 +248,30 @@ def post_to_nostr(message):
         for relay in relays:
             relay_manager.add_relay(relay)
         
-        # Open connections (SSL cert verification disabled for GitHub Actions compatibility)
+        # Open connections
         relay_manager.open_connections({"cert_reqs": ssl.CERT_NONE})
-        time.sleep(1.25)  # Wait for WebSocket connections
+        time.sleep(1.25)
         
         # Publish
         relay_manager.publish_event(event)
-        time.sleep(1)  # Give time to transmit
+        time.sleep(1)
         
         relay_manager.close_connections()
         print("✅ Posted to Nostr successfully")
         
     except Exception as e:
         print(f"❌ Nostr error: {e}")
+        import traceback
+        traceback.print_exc()
 
 def post():
+    print("Starting bot...")
+    
+    # Validate Telegram credentials
+    if not BOT_TOKEN or not CHANNEL_ID:
+        print("❌ Missing Telegram credentials")
+        sys.exit(1)
+    
     volume_data = get_volume_data()
     
     if not volume_data:
@@ -253,11 +282,16 @@ def post():
     message = build_message(volume_data, stock_data)
     
     if not message:
+        print("No message built. Skipping post.")
         return
     
-    # Post to both platforms independently (one failure doesn't break the other)
+    print("Posting to Telegram...")
     post_to_telegram(message)
+    
+    print("Posting to Nostr...")
     post_to_nostr(message)
+    
+    print("Done!")
 
 if __name__ == "__main__":
     post()
