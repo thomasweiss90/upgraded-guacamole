@@ -3,10 +3,15 @@ import time
 import math
 import requests
 import yfinance as yf
+import ssl
 from datetime import datetime
+from nostr.key import PrivateKey
+from nostr.event import Event
+from nostr.relay_manager import RelayManager
 
 BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHANNEL_ID = os.environ['TELEGRAM_CHANNEL_ID']
+NOSTR_PRIVATE_KEY = os.environ.get('NOSTR_PRIVATE_KEY')
 
 def is_valid_number(n):
     if n is None:
@@ -150,8 +155,6 @@ Price: ${price:.2f} {emoji} {change_str}"""
         
         if is_valid_number(market_cap) and market_cap > 0:
             stock_section += f"\nMarket Cap: {format_billions(market_cap)}"
-            
-            # ADD THE STOCK SECTION NOW
             sections.append(stock_section)
             
             implied = ratio * market_cap
@@ -169,6 +172,76 @@ Implied Kraken Value: {format_billions(implied)}"""
     
     return "\n".join(sections)
 
+def post_to_telegram(message):
+    """Post message to Telegram"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    
+    try:
+        response = requests.post(url, json={
+            'chat_id': CHANNEL_ID,
+            'text': message,
+            'disable_notification': True
+        }, timeout=15)
+        
+        if response.status_code == 200:
+            print("✅ Posted to Telegram successfully")
+        else:
+            print(f"❌ Telegram failed: {response.status_code}")
+    except Exception as e:
+        print(f"❌ Telegram error: {e}")
+
+def post_to_nostr(message):
+    """Post message to Nostr relays"""
+    if not NOSTR_PRIVATE_KEY:
+        print("⚠️  No NOSTR_PRIVATE_KEY found, skipping Nostr")
+        return
+    
+    try:
+        # Support both hex and nsec formats (if nsec, warn user)
+        key_hex = NOSTR_PRIVATE_KEY
+        if key_hex.startswith('nsec1'):
+            print("❌ Error: Please provide private key in hex format, not nsec1")
+            return
+            
+        private_key = PrivateKey(bytes.fromhex(key_hex))
+        
+        # Create Kind 1 (text note) event
+        event = Event(
+            public_key=private_key.public_key.hex(),
+            created_at=int(time.time()),
+            kind=1,
+            content=message,
+            tags=[]
+        )
+        
+        private_key.sign_event(event)
+        
+        # Connect to popular relays
+        relay_manager = RelayManager()
+        relays = [
+            "wss://relay.damus.io",
+            "wss://nos.lol", 
+            "wss://relay.nostr.band",
+            "wss://nostr.mom"
+        ]
+        
+        for relay in relays:
+            relay_manager.add_relay(relay)
+        
+        # Open connections (SSL cert verification disabled for GitHub Actions compatibility)
+        relay_manager.open_connections({"cert_reqs": ssl.CERT_NONE})
+        time.sleep(1.25)  # Wait for WebSocket connections
+        
+        # Publish
+        relay_manager.publish_event(event)
+        time.sleep(1)  # Give time to transmit
+        
+        relay_manager.close_connections()
+        print("✅ Posted to Nostr successfully")
+        
+    except Exception as e:
+        print(f"❌ Nostr error: {e}")
+
 def post():
     volume_data = get_volume_data()
     
@@ -182,19 +255,9 @@ def post():
     if not message:
         return
     
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    
-    try:
-        response = requests.post(url, json={
-            'chat_id': CHANNEL_ID,
-            'text': message,
-            'disable_notification': True
-        }, timeout=15)
-        
-        if response.status_code == 200:
-            print("Posted successfully")
-    except Exception as e:
-        print(f"Failed to post: {e}")
+    # Post to both platforms independently (one failure doesn't break the other)
+    post_to_telegram(message)
+    post_to_nostr(message)
 
 if __name__ == "__main__":
     post()
