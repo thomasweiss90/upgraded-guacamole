@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import requests
 import yfinance as yf
 from datetime import datetime
@@ -7,104 +8,192 @@ from datetime import datetime
 BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHANNEL_ID = os.environ['TELEGRAM_CHANNEL_ID']
 
-def format_currency(num):
-    """Format number with $ and commas, 2 decimal places"""
-    return f"${num:,.2f}"
+def is_valid_number(n):
+    if n is None:
+        return False
+    if isinstance(n, float):
+        return not (math.isnan(n) or math.isinf(n))
+    return True
 
-def compact_format(num):
-    """Compact format for the summary sentence ($1.36B or $938.65M)"""
-    if num >= 1e9:
-        return f"${num/1e9:.2f}B"
-    elif num >= 1e6:
-        return f"${num/1e6:.2f}M"
-    else:
-        return f"${num:.2f}"
+def fetch_with_retry(url, max_retries=3, delay=2):
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                return resp.json()
+            time.sleep(delay * (attempt + 1))
+        except:
+            if attempt == max_retries - 1:
+                return None
+            time.sleep(delay * (attempt + 1))
+    return None
 
-def fetch_data():
-    try:
-        time.sleep(1)
-        btc = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", timeout=10).json()
-        btc_price = btc['bitcoin']['usd']
-        
-        time.sleep(1)
-        kraken = requests.get("https://api.coingecko.com/api/v3/exchanges/kraken", timeout=10).json()
-        
-        time.sleep(1)
-        coinbase = requests.get("https://api.coingecko.com/api/v3/exchanges/gdax", timeout=10).json()
-        
-        kraken_vol = kraken.get('trade_volume_24h_btc', 0) * btc_price
-        coinbase_vol = coinbase.get('trade_volume_24h_btc', 0) * btc_price
-        
-        if kraken_vol == 0 or coinbase_vol == 0:
-            return None
+def get_volume_data():
+    for attempt in range(3):
+        try:
+            time.sleep(1)
+            btc_data = fetch_with_retry("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd")
+            if not btc_data:
+                continue
+            btc_price = btc_data['bitcoin']['usd']
             
-        coin = yf.Ticker("COIN")
-        info = coin.info
-        hist = coin.history(period="2d")
+            time.sleep(1)
+            kraken = fetch_with_retry("https://api.coingecko.com/api/v3/exchanges/kraken")
+            time.sleep(1)
+            coinbase = fetch_with_retry("https://api.coingecko.com/api/v3/exchanges/gdax")
+            
+            if kraken and coinbase:
+                kraken_vol = kraken.get('trade_volume_24h_btc', 0) * btc_price
+                coinbase_vol = coinbase.get('trade_volume_24h_btc', 0) * btc_price
+                
+                if kraken_vol > 0 and coinbase_vol > 0:
+                    return {
+                        'kraken_vol': kraken_vol,
+                        'coinbase_vol': coinbase_vol
+                    }
+        except:
+            time.sleep(3)
+    return None
+
+def get_stock_data():
+    ticker = yf.Ticker("COIN")
+    
+    for period in ['2d', '5d', '1mo']:
+        try:
+            hist = ticker.history(period=period)
+            if not hist.empty and len(hist) >= 2:
+                closes = hist['Close'].dropna()
+                if len(closes) >= 2:
+                    current = closes.iloc[-1]
+                    previous = closes.iloc[-2]
+                    if is_valid_number(current) and is_valid_number(previous):
+                        change = ((current - previous) / previous) * 100
+                        info = ticker.info
+                        market_cap = info.get('marketCap') or info.get('enterpriseValue') or 0
+                        return {
+                            'price': current,
+                            'change': change,
+                            'market_cap': market_cap
+                        }
+        except:
+            continue
+    
+    try:
+        info = ticker.info
+        price = (info.get('regularMarketPrice') or 
+                info.get('currentPrice') or 
+                info.get('previousClose'))
+        prev_close = (info.get('regularMarketPreviousClose') or 
+                     info.get('previousClose'))
+        market_cap = info.get('marketCap') or info.get('enterpriseValue') or 0
         
-        stock_price = hist['Close'].iloc[-1]
-        market_cap = info.get('marketCap', 0)
-        prev_close = hist['Close'].iloc[-2]
-        daily_change = ((stock_price - prev_close) / prev_close) * 100
-        
-        return {
-            'kraken_vol': kraken_vol,
-            'coinbase_vol': coinbase_vol,
-            'coin_price': stock_price,
-            'coin_change': daily_change,
-            'market_cap': market_cap
-        }
-    except Exception as e:
-        print(f"Error: {e}")
+        if is_valid_number(price) and is_valid_number(prev_close) and prev_close > 0:
+            change = ((price - prev_close) / prev_close) * 100
+            return {
+                'price': price,
+                'change': change,
+                'market_cap': market_cap
+            }
+        elif is_valid_number(price):
+            return {
+                'price': price,
+                'change': 0.0,
+                'market_cap': market_cap
+            }
+    except:
+        pass
+    
+    return None
+
+def format_millions(num):
+    """Format as millions with 2 decimals: $938.65M or $1,366.10M"""
+    if not is_valid_number(num):
+        return "N/A"
+    return f"${num/1e6:.2f}M"
+
+def format_billions(num):
+    """Format as billions with 2 decimals: $44.60B"""
+    if not is_valid_number(num):
+        return "N/A"
+    return f"${num/1e9:.2f}B"
+
+def build_message(volume_data, stock_data):
+    if not volume_data:
         return None
-
-def format_message(data):
-    if not data:
-        return "⚠️ Daily metrics unavailable"
     
-    kraken_vol = data['kraken_vol']
-    coinbase_vol = data['coinbase_vol']
-    market_cap = data['market_cap']
+    kraken_vol = volume_data['kraken_vol']
+    coinbase_vol = volume_data['coinbase_vol']
+    ratio = kraken_vol / coinbase_vol
+    percentage = ratio * 100
     
-    # Precise calculations (no rounding until display)
-    ratio_decimal = kraken_vol / coinbase_vol if coinbase_vol > 0 else 0
-    percentage = ratio_decimal * 100
-    implied_valuation = ratio_decimal * market_cap
+    sections = []
     
-    # Change emoji
-    change_str = f"+{data['coin_change']:.2f}%" if data['coin_change'] >= 0 else f"{data['coin_change']:.2f}%"
-    change_emoji = "🟢" if data['coin_change'] >= 0 else "🔴"
+    # Header
+    sections.append(f"📊 Kraken/Coinbase Daily Report — {datetime.utcnow().strftime('%Y-%m-%d')}\n")
     
-    msg = f"""📊 Kraken/Coinbase Daily Report — {datetime.utcnow().strftime('%Y-%m-%d')}
-
-💹 24h Volume (USD)
-Kraken:   {format_currency(kraken_vol)}
-Coinbase: {format_currency(coinbase_vol)}
-📈 Kraken is {percentage:.2f}% of Coinbase volume
-
-💰 COIN Market Data
-Price: ${data['coin_price']:.2f} {change_emoji} {change_str}
-Market Cap: {format_currency(market_cap)}
-
-🎯 Volume-Based Valuation
-Implied Kraken Value: {format_currency(implied_valuation)}
-
-Kraken's 24h volume is {compact_format(kraken_vol)} which is {percentage:.2f}% of Coinbase. Using only volume as a valuation indicator, this equals to a Kraken valuation of {compact_format(implied_valuation)} compared to Coinbases current {compact_format(market_cap)} market cap."""
+    # Volume Section - BOTH in millions for consistent precision
+    vol_section = f"""💹 24h Volume
+Kraken:   {format_millions(kraken_vol)}
+Coinbase: {format_millions(coinbase_vol)}
+📈 Kraken is at {percentage:.2f}% of Coinbase 24h volume"""
+    sections.append(vol_section)
     
-    return msg
+    # Stock Section
+    if stock_data and is_valid_number(stock_data['price']):
+        price = stock_data['price']
+        change = stock_data['change'] if is_valid_number(stock_data['change']) else 0
+        market_cap = stock_data['market_cap']
+        
+        change_str = f"+{change:.2f}%" if change >= 0 else f"{change:.2f}%"
+        emoji = "🟢" if change >= 0 else "🔴"
+        
+        stock_section = f"""\n💰 COIN Market Data
+Price: ${price:.2f} {emoji} {change_str}"""
+        
+        if is_valid_number(market_cap) and market_cap > 0:
+            stock_section += f"\nMarket Cap: {format_billions(market_cap)}"
+            
+            implied = ratio * market_cap
+            val_section = f"""\n🎯 Volume-Based Valuation
+Implied Kraken Value: {format_billions(implied)}"""
+            sections.append(val_section)
+            
+            # Summary sentence
+            summary = f"""\nKraken's 24h volume is {format_millions(kraken_vol)} which is {percentage:.2f}% of Coinbase. Using only volume as a valuation indicator, this equals to a Kraken valuation of {format_billions(implied)} compared to Coinbases current {format_billions(market_cap)} market cap."""
+            sections.append(summary)
+        else:
+            sections.append(stock_section)
+    else:
+        sections.append(f"\n📊 Stock data temporarily unavailable. Kraken volume is {format_millions(kraken_vol)} ({percentage:.2f}% of Coinbase).")
+    
+    return "\n".join(sections)
 
 def post():
+    volume_data = get_volume_data()
+    
+    if not volume_data:
+        print("No volume data. Skipping post.")
+        return
+    
+    stock_data = get_stock_data()
+    message = build_message(volume_data, stock_data)
+    
+    if not message:
+        return
+    
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = fetch_data()
-    message = format_message(data)
     
-    response = requests.post(url, json={
-        'chat_id': CHANNEL_ID,
-        'text': message,
-        'disable_notification': True
-    }, timeout=10)
-    
-    print(f"Response: {response.status_code}")
+    try:
+        response = requests.post(url, json={
+            'chat_id': CHANNEL_ID,
+            'text': message,
+            'disable_notification': True
+        }, timeout=15)
+        
+        if response.status_code == 200:
+            print("Posted successfully")
+    except Exception as e:
+        print(f"Failed to post: {e}")
 
 if __name__ == "__main__":
     post()
