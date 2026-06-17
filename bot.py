@@ -210,59 +210,66 @@ def post_to_nostr(message):
     """Post message to Nostr relays"""
     if not NOSTR_AVAILABLE:
         print("⚠️  Nostr library not available, skipping")
-        return
+        return False
     
     if not NOSTR_PRIVATE_KEY:
         print("⚠️  No NOSTR_PRIVATE_KEY found, skipping Nostr")
-        return
+        return False
     
     try:
-        # Support both hex and nsec formats
-        key_hex = NOSTR_PRIVATE_KEY.strip()
-        if key_hex.startswith('nsec1'):
-            print("❌ Error: Please provide private key in hex format, not nsec1")
-            return
-            
-        private_key = PrivateKey(bytes.fromhex(key_hex))
+        print("Posting to Nostr...")
         
-        # Create Kind 1 (text note) event
-        event = Event(
-            public_key=private_key.public_key.hex(),
-            created_at=int(time.time()),
-            kind=1,
-            content=message,
-            tags=[]
-        )
-        
-        private_key.sign_event(event)
-        
-        # Connect to popular relays
-        relay_manager = RelayManager()
+        # Use reliable, well-connected relays
         relays = [
             "wss://relay.damus.io",
-            "wss://nos.lol", 
+            "wss://nostr-pub.wellorder.net",
             "wss://relay.nostr.band",
-            "wss://nostr.mom"
+            "wss://nos.lol"
         ]
         
+        relay_manager = RelayManager()
         for relay in relays:
             relay_manager.add_relay(relay)
         
-        # Open connections
         relay_manager.open_connections({"cert_reqs": ssl.CERT_NONE})
-        time.sleep(1.25)
+        time.sleep(3)  # Wait 3 seconds for connections to establish
         
-        # Publish
-        relay_manager.publish_event(event)
-        time.sleep(1)
+        # Create and sign event
+        private_key = PrivateKey(bytes.fromhex(NOSTR_PRIVATE_KEY.strip()))
+        event = Event(
+            public_key=private_key.public_key.hex(),
+            content=message,
+            created_at=int(time.time()),
+            kind=1
+        )
+        private_key.sign_event(event)
+        
+        # Try to publish with one retry
+        published = False
+        try:
+            relay_manager.publish_event(event)
+            time.sleep(2)  # Wait for relays to receive
+            print("✅ Posted to Nostr successfully")
+            published = True
+        except Exception as e:
+            print(f"⚠️ First attempt failed, retrying... ({e})")
+            time.sleep(2)
+            try:
+                relay_manager.publish_event(event)
+                time.sleep(2)
+                print("✅ Posted to Nostr successfully on retry")
+                published = True
+            except Exception as e2:
+                print(f"❌ Nostr retry failed: {e2}")
         
         relay_manager.close_connections()
-        print("✅ Posted to Nostr successfully")
+        return published
         
     except Exception as e:
         print(f"❌ Nostr error: {e}")
         import traceback
         traceback.print_exc()
+        return False
 
 def post():
     print("Starting bot...")
@@ -295,3 +302,4 @@ def post():
 
 if __name__ == "__main__":
     post()
+    os._exit(0)  # Force kill immediately, don't wait for hung threads
