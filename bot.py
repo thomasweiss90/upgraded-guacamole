@@ -7,24 +7,36 @@ from datetime import datetime
 BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHANNEL_ID = os.environ['TELEGRAM_CHANNEL_ID']
 
+print(f"Starting script...")
+print(f"Channel ID: {CHANNEL_ID}")
+print(f"Token prefix: {BOT_TOKEN[:10]}...")
+
 def fetch_data():
     try:
+        print("Fetching BTC price...")
         time.sleep(1)
         btc = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", timeout=10).json()
         btc_price = btc['bitcoin']['usd']
+        print(f"BTC price: {btc_price}")
         
+        print("Fetching Kraken...")
         time.sleep(1)
         kraken = requests.get("https://api.coingecko.com/api/v3/exchanges/kraken", timeout=10).json()
         
+        print("Fetching Coinbase...")
         time.sleep(1)
         coinbase = requests.get("https://api.coingecko.com/api/v3/exchanges/gdax", timeout=10).json()
         
         kraken_vol = kraken.get('trade_volume_24h_btc', 0) * btc_price
         coinbase_vol = coinbase.get('trade_volume_24h_btc', 0) * btc_price
         
+        print(f"Kraken vol: {kraken_vol}, Coinbase vol: {coinbase_vol}")
+        
         if kraken_vol == 0 or coinbase_vol == 0:
+            print("ERROR: Zero volume returned")
             return None
             
+        print("Fetching COIN stock...")
         coin = yf.Ticker("COIN")
         info = coin.info
         hist = coin.history(period="2d")
@@ -34,6 +46,8 @@ def fetch_data():
         prev_close = hist['Close'].iloc[-2]
         daily_change = ((stock_price - prev_close) / prev_close) * 100
         
+        print(f"Stock data: ${stock_price}, Cap: {market_cap}")
+        
         return {
             'kraken_vol': kraken_vol,
             'coinbase_vol': coinbase_vol,
@@ -42,7 +56,7 @@ def fetch_data():
             'market_cap': market_cap
         }
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"ERROR in fetch_data: {e}")
         return None
 
 def format_billions(num):
@@ -71,11 +85,22 @@ def post():
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = fetch_data()
     
-    requests.post(url, json={
+    message = format_message(data)
+    print(f"Message length: {len(message)} chars")
+    
+    response = requests.post(url, json={
         'chat_id': CHANNEL_ID,
-        'text': format_message(data),
+        'text': message,
         'disable_notification': True
     }, timeout=10)
+    
+    print(f"Telegram response: {response.status_code}")
+    print(f"Response body: {response.text}")
+    
+    if response.status_code != 200:
+        print("ERROR: Failed to post to Telegram")
+    else:
+        print("SUCCESS: Posted to Telegram")
 
 if __name__ == "__main__":
     post()
