@@ -106,13 +106,11 @@ def get_stock_data():
     return None
 
 def format_millions(num):
-    """Format as millions with 2 decimals: $938.65M or $1,366.10M"""
     if not is_valid_number(num):
         return "N/A"
     return f"${num/1e6:.2f}M"
 
 def format_billions(num):
-    """Format as billions with 2 decimals: $44.60B"""
     if not is_valid_number(num):
         return "N/A"
     return f"${num/1e9:.2f}B"
@@ -131,7 +129,7 @@ def build_message(volume_data, stock_data):
     # Header
     sections.append(f"📊 Kraken/Coinbase Daily Report — {datetime.utcnow().strftime('%Y-%m-%d')}\n")
     
-    # Volume Section - BOTH in millions for consistent precision
+    # Volume Section
     vol_section = f"""💹 24h Volume
 Kraken:   {format_millions(kraken_vol)}
 Coinbase: {format_millions(coinbase_vol)}
@@ -153,6 +151,9 @@ Price: ${price:.2f} {emoji} {change_str}"""
         if is_valid_number(market_cap) and market_cap > 0:
             stock_section += f"\nMarket Cap: {format_billions(market_cap)}"
             
+            # ADD THE STOCK SECTION NOW
+            sections.append(stock_section)
+            
             implied = ratio * market_cap
             val_section = f"""\n🎯 Volume-Based Valuation
 Implied Kraken Value: {format_billions(implied)}"""
@@ -164,7 +165,7 @@ Implied Kraken Value: {format_billions(implied)}"""
         else:
             sections.append(stock_section)
     else:
-        sections.append(f"\n📊 Stock data temporarily unavailable. Kraken volume is {format_millions(kraken_vol)} ({percentage:.2f}% of Coinbase).")
+        sections.append(f"\n📊 Stock data temporarily unavailable. Kraken volume is {format_millions(kraken_vol)} ({percentage:.2f}% of Coinbase 24h volume).")
     
     return "\n".join(sections)
 
