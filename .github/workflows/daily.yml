@@ -19,7 +19,7 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install requests yfinance python-nostr
+        pip install requests yfinance nostr
     
     - name: Run bot
       env:
